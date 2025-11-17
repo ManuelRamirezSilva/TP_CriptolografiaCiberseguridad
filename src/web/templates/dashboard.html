@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Welcome to Your Dashboard{% if username %}, {{ username }}{% endif %}!</h1>
+            <nav>
+                <ul>
+                    <li><a href="{{ url_for('routes.logout') }}">Logout</a></li>
+                </ul>
+            </nav>
+        </header>
+        <main>
+            <h2>Your Profile</h2>
+            <p>Here you can manage your account settings and view your activity.</p>
+            <!-- Additional dashboard content can be added here -->
+        </main>
+        <footer>
+            <p>&copy; 2023 Your Company. All rights reserved.</p>
+        </footer>
+    </div>
+</body>
+</html>

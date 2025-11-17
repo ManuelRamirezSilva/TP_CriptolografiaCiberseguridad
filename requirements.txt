@@ -1,0 +1,26 @@
+# Web Framework
+Flask==2.3.3
+Werkzeug==2.3.7
+Flask-Session==0.5.0
+
+# Criptografía
+argon2-cffi==23.1.0
+PyJWT==2.8.0
+cryptography==41.0.5
+
+# Base de Datos
+SQLAlchemy==2.0.23
+
+# Utilidades
+python-dotenv==1.0.0
+email-validator==2.1.0
+
+# Rate Limiting
+Flask-Limiter==3.5.0
+
+# CORS (si se necesita en el futuro)
+Flask-CORS==4.0.0
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
