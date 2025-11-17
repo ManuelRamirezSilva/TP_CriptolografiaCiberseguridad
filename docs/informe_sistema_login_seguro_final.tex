@@ -1,0 +1,350 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{setspace}
+\usepackage{hyperref}
+\usepackage{color}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{helvet}
+
+% Usar Arial como fuente principal
+\renewcommand{\familydefault}{\sfdefault}
+
+% Ajuste de headheight
+\setlength{\headheight}{15pt}
+
+% Configuración de márgenes - A4
+\geometry{
+  paper=a4paper,
+  top=2.5cm,
+  bottom=2.5cm,
+  left=2.5cm,
+  right=2.5cm
+}
+
+% Configuración de espaciado reducido
+\onehalfspacing
+
+% Reducir espaciado entre items
+\usepackage{enumitem}
+\setlist[description]{itemsep=0pt, parsep=0pt, leftmargin=2cm}
+\setlist[enumerate]{itemsep=2pt, parsep=2pt}
+\setlist[itemize]{itemsep=2pt, parsep=2pt}
+
+% Configuración de encabezado y pie
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textit{Sistema de Login Seguro}}
+\fancyhead[R]{\thepage}
+\fancyfoot[C]{\textit{Criptografía y Ciberseguridad - TP Final}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Configuración de código
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{red},
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny,
+  backgroundcolor=\color{lightgray!30},
+  frame=single,
+  captionpos=b
+}
+
+% Información del documento
+\title{
+  \vspace{2cm}
+  \includegraphics[width=4cm]{image.png}\\[1cm]
+  {\LARGE \textbf{SISTEMA DE AUTENTICACIÓN SEGURO}}\\
+  {\large Diseño e Implementación de Mejores Prácticas en Criptografía}\\
+  \vspace{0.5cm}
+  {\normalsize Trabajo Práctico Final - Noviembre 2025}
+}
+
+\author{\textbf{Criptografía y Ciberseguridad}}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\vspace{0.5cm}
+
+\section*{RESUMEN EJECUTIVO}
+
+El presente informe detalla el diseño de un sistema de autenticación seguro. Se utilizan algoritmos de hashing modernos (Argon2id), tokens JWT con rotación automática, refresh token stateful, y múltiples controles preventivos. El sistema cumple con OWASP Top 10, NIST SP 800-63B y principios de privacidad por diseño.
+
+\section{REQUISITOS FUNCIONALES Y NO FUNCIONALES}
+
+\subsection{Requisitos Funcionales (RF)}
+
+Los RF especifican qué funcionalidades debe proporcionar el sistema:
+
+\begin{description}
+  \item[RF1 - Registro] El sistema permite crear una cuenta con email y contraseña únicos.
+  \item[RF2 - Verificación de Email] Tras el registro, el usuario verifica su email mediante enlace único y de corta duración.
+  \item[RF3 - Login] El usuario autenticado con email y contraseña correctos recibe tokens de sesión.
+  \item[RF4 - Logout] El usuario cierra su sesión de forma segura revocando todos los tokens.
+  \item[RF5 - Cambio de Contraseña] El usuario autenticado cambia su contraseña (requiriendo la antigua).
+  \item[RF6 - Recuperación de Contraseña] Usuario que olvidó su contraseña recibe enlace de reseteo por email.
+  \item[RF7 - Gestión de Sesión (Refresh)] El sistema renueva sesiones expiradas sin pedir credenciales, mediante refresh token.
+\end{description}
+
+\subsection{Requisitos No Funcionales (RNF)}
+
+Los RNF especifican cómo el sistema implementa seguridad y calidad:
+
+\begin{description}
+  \item[RNF1 - Confidencialidad] Las contraseñas se almacenan hasheadas (Argon2id), nunca en texto plano.
+  \item[RNF2 - Resistencia a Fuerza Bruta] Rate limiting en endpoints críticos (login, recuperación).
+  \item[RNF3 - Transporte Seguro] Comunicación cifrada con HTTPS/TLS 1.2+.
+  \item[RNF4 - Gestión Segura de Sesión] Sesiones gestionadas por JWT (acceso) + cookies seguras (refresh).
+  \item[RNF5 - Prevención XSS] Tokens de sesión en cookies HttpOnly, no accesibles por JavaScript.
+  \item[RNF6 - Prevención CSRF] Cookies con flag SameSite=Strict.
+  \item[RNF7 - Mínimo Privilegio] Tokens contienen solo user\_id y roles, sin información sensible (PII).
+\end{description}
+
+\section{MODELO DE DATOS}
+
+El modelo prioriza seguridad utilizando UUIDs como claves primarias para mitigar enumeración de recursos.
+
+\subsection{Tabla: Usuarios}
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{|l|l|p{3cm}|}
+    \hline
+    \textbf{Columna} & \textbf{Tipo} & \textbf{Descripción} \\
+    \hline
+    id & UUID PK & Identificador único (UUID v4) \\
+    \hline
+    email & VARCHAR UNIQUE & Email como identificador de login \\
+    \hline
+    password\_hash & VARCHAR & Hash Argon2id de la contraseña \\
+    \hline
+    email\_verified & BOOLEAN & Flag de verificación de email \\
+    \hline
+    created\_at & TIMESTAMP & Fecha de creación \\
+    \hline
+    updated\_at & TIMESTAMP & Fecha de última modificación \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\subsection{Tabla: Sesiones}
+
+Tabla fundamental para gestión stateful de refresh tokens, permitiendo revocación y rotación.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{|l|l|p{2.5cm}|}
+    \hline
+    \textbf{Columna} & \textbf{Tipo} & \textbf{Descripción} \\
+    \hline
+    id & UUID PK & Identificador de sesión \\
+    \hline
+    user\_id & UUID FK & Usuario propietario \\
+    \hline
+    refresh\_token\_hash & VARCHAR UNIQUE & Hash SHA-256 del refresh token \\
+    \hline
+    ip\_address & VARCHAR & IP de origen (auditoría) \\
+    \hline
+    user\_agent & TEXT & Metadata del cliente \\
+    \hline
+    expires\_at & TIMESTAMP & Expiración del refresh token \\
+    \hline
+    created\_at & TIMESTAMP & Creación de sesión \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\textbf{Nota Crítica:} El hash del refresh token se almacena, no el token en texto plano. Si la BD fuese comprometida, los atacantes no podrían usar los tokens directamente.
+
+\section{FLUJOS DE AUTENTICACIÓN}
+
+\subsection{Flujo de Login y Emisión de Tokens}
+
+\begin{enumerate}
+  \item \textbf{Petición}: Cliente envía email y password a \texttt{/api/login}.
+  \item \textbf{Rate Limiting}: Servidor aplica límites para mitigar fuerza bruta.
+  \item \textbf{Verificación}: Se busca el usuario por email y verifica contraseña con \texttt{argon2.verify()}. Error genérico 401 para evitar enumeración.
+  \item \textbf{Generación de Tokens} (exitosa):
+    \begin{itemize}
+      \item \textbf{Access Token (JWT)}: Payload mínimo (sub: user.id), expiración 15 min, algoritmo RS256/ES256.
+      \item \textbf{Refresh Token (Opaque)}: String aleatorio 32 bytes, expiración 7 días.
+    \end{itemize}
+  \item \textbf{Persistencia}: Hash SHA-256 del refresh token se almacena en tabla Sesiones.
+  \item \textbf{Respuesta}: Ambos tokens enviados en cookies HttpOnly+Secure+SameSite=Strict.
+\end{enumerate}
+
+\subsection{Flujo de Refresh y Rotación de Tokens}
+
+\begin{enumerate}
+  \item \textbf{Contexto}: Access token expira, cliente detecta 401 en petición protegida.
+  \item \textbf{Petición}: Cliente envía refresh token a \texttt{/api/refresh}.
+  \item \textbf{Validación}:
+    \begin{itemize}
+      \item Servidor hashea el refresh token recibido.
+      \item Busca hash en tabla Sesiones.
+      \item Si no existe o expiró: 401 Unauthorized, re-login requerido.
+    \end{itemize}
+  \item \textbf{Rotación} (implementación clave):
+    \begin{itemize}
+      \item Token válido se \textbf{elimina inmediatamente} de BD (invalidando su uso futuro).
+      \item Se genera nuevo access token (15 min).
+      \item Se genera nuevo refresh token (7 días).
+      \item Hash del nuevo refresh token se almacena en Sesiones.
+    \end{itemize}
+  \item \textbf{Justificación}: Si el token es comprometido, el usuario legítimo será desautenticado en su próximo refresh (token ya invalidado por atacante). Detecta y contiene brechas.
+  \item \textbf{Respuesta}: Nuevos tokens en cookies seguras.
+\end{enumerate}
+
+\subsection{Flujo de Logout (Revocación)}
+
+\begin{enumerate}
+  \item \textbf{Petición}: Cliente envía petición a \texttt{/api/logout} (con refresh token).
+  \item \textbf{Revocación}: Servidor hashea token, busca y \textbf{elimina} registro en Sesiones.
+  \item \textbf{Respuesta}: 204 No Content.
+  \item \textbf{Limpieza Cliente}: Aplicación borra tokens de su almacenamiento.
+\end{enumerate}
+
+Este mecanismo stateful permite revocación permanente e inmediata del lado del servidor, a diferencia de JWTs de acceso (stateless).
+
+\section{DIAGRAMAS DE SECUENCIA}
+
+Los siguientes diagramas ilustran los flujos críticos del sistema de autenticación.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{1.png}
+  \caption{Flujo de Registro: El cliente envía email y contraseña. El servidor valida, hashea la contraseña con Argon2id, y almacena. Se genera token de verificación de email y se envía asincronamente.}
+  \label{fig:registro}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{2.png}
+  \caption{Flujo de Login: Después de validaciones y rate limiting, se generan access token (JWT, 15 min) y refresh token (opaco, 7 días). Ambos se envían en cookies seguras.}
+  \label{fig:login}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{4.png}
+  \caption{Flujo de Logout: El servidor revoca el refresh token eliminando su hash de la tabla Sesiones. El acceso token se añade a lista negra. Cliente limpia almacenamiento.}
+  \label{fig:logout}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.9\textwidth]{3.png}
+  \caption{Flujo de Refresh: Rotación de tokens - token antiguo se elimina inmediatamente. Si se detecta reuso, se revocan todos los tokens de la familia (indicador de compromiso).}
+  \label{fig:refresh}
+\end{figure}
+
+\section{DECISIONES CRIPTOGRÁFICAS}
+
+\subsection{Hashing de Contraseñas: Argon2id}
+
+\textbf{Algoritmo}: Argon2id es la recomendación actual de OWASP y ganador de Password Hashing Competition (2015).
+
+\textbf{Ventajas}:
+\begin{itemize}
+  \item \textbf{Memory-Hard}: Incrementa costo de fuerza bruta tanto en tiempo como en memoria.
+  \item \textbf{GPU/ASIC Resistance}: Resistencia superior al hardware especializado vs. bcrypt/PBKDF2.
+  \item \textbf{Moderna}: Diseñada considerando tendencias de hardware actual.
+\end{itemize}
+
+\textbf{Parámetros OWASP}: memoryCost=19456, timeCost=2, parallelism=1.
+
+\subsection{Firmas de Tokens: RS256 o ES256}
+
+\textbf{Selección}: Algoritmos asimétricos (clave pública/privada) en lugar de HS256.
+
+\textbf{Ventajas}:
+\begin{itemize}
+  \item Servicio de autenticación firma con clave privada.
+  \item Microservicios verifican con clave pública.
+  \item Evita compartir secreto simétrico entre servicios.
+  \item Escalabilidad y seguridad mejoradas en arquitecturas distribuidas.
+\end{itemize}
+
+\section{GESTIÓN DE SESIONES Y ALMACENAMIENTO DE TOKENS}
+
+\subsection{Método: Cookies con Seguridad Reforzada}
+
+Se descarta LocalStorage/SessionStorage por vulnerabilidad inherente a XSS. Los tokens se almacenan en cookies con atributos de seguridad:
+
+\begin{itemize}
+  \item \textbf{HttpOnly=True}: Previene acceso desde JavaScript, mitiga XSS.
+  \item \textbf{Secure=True}: Solo transmitidas por HTTPS, previene man-in-the-middle.
+  \item \textbf{SameSite=Strict}: Restringe envío a peticiones del mismo origen, previene CSRF.
+  \item \textbf{Path Específico}: Refresh token con Path=/api/refresh limita scope.
+\end{itemize}
+
+\subsection{Inferencia de Estado en Frontend}
+
+Como tokens no son accesibles por JavaScript, el cliente infiere estado de autenticación realizando petición a endpoint protegido (ej. \texttt{/api/me}):
+\begin{itemize}
+  \item \textbf{200 OK}: Sesión válida, datos del usuario retornados.
+  \item \textbf{401 Unauthorized}: Usuario no autenticado.
+\end{itemize}
+
+\section{PRIVACIDAD Y MINIMIZACIÓN DE DATOS}
+
+\subsection{Minimización de Datos}
+
+\textbf{Registro}: Solo información estrictamente necesaria para autenticación (email, contraseña).
+
+\textbf{JWT Payload}: Access tokens contienen solo user\_id (UUID) y roles, excluyendo PII. Si endpoint requiere datos del usuario, consulta BD usando user\_id del token.
+
+\subsection{Políticas de Retención}
+
+\begin{itemize}
+  \item \textbf{Sesiones}: Cron job purga registros con expires\_at vencido.
+  \item \textbf{Logs}: Anonimizados o eliminados tras 90 días de retención.
+\end{itemize}
+
+\subsection{Derecho al Olvido}
+
+Sistema provee endpoint de eliminación de cuenta (previa re-autenticación):
+\begin{itemize}
+  \item Hard delete del registro en tabla Usuarios.
+  \item ON DELETE CASCADE elimina en cascada registros en Sesiones.
+\end{itemize}
+
+\section{CONCLUSIONES}
+
+El sistema de autenticación diseñado implementa múltiples capas de seguridad: hashing moderno (Argon2id), tokens de corta duración con rotación automática, refresh tokens stateful para revocación, cookies seguras contra XSS/CSRF, y privacidad por diseño. Cumple con estándares OWASP, NIST SP 800-63B y principios de minimización de datos.
+
+Las mejoras futuras incluyen autenticación multifactor (TOTP, WebAuthn), análisis de riesgo adaptativo, y arquitectura zero trust. La seguridad es un proceso continuo que requiere revisiones de código, pentesting, y actualizaciones de dependencias.
+
+\newpage
+
+\section*{REFERENCIAS}
+
+\begin{enumerate}
+  \item OWASP. (2021). OWASP Top Ten 2021. https://owasp.org/Top10/
+  \item OWASP. (2023). Authentication Cheat Sheet. https://cheatsheetseries.owasp.org/
+  \item NIST. (2020). SP 800-63B: Digital Identity Guidelines - Authentication.
+  \item RFC 7519: JSON Web Token (JWT). https://tools.ietf.org/html/rfc7519
+  \item Biryukov, A., Dinu, D., \& Khovratovich, D. (2016). Argon2: Memory-hard function for password hashing.
+  \item OWASP. Password Storage Cheat Sheet. https://cheatsheetseries.owasp.org/
+  \item Mozilla. Web Security Guidelines. https://infosec.mozilla.org/guidelines/web\_security
+  \item EU GDPR (2016/679). Reglamento General de Protección de Datos.
+\end{enumerate}
+
+\end{document}
