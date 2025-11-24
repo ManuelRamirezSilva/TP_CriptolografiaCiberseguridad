@@ -223,6 +223,114 @@ Tabla fundamental para gestión stateful de refresh tokens, permitiendo revocaci
 
 Este mecanismo stateful permite revocación permanente e inmediata del lado del servidor, a diferencia de JWTs de acceso (stateless).
 
+\subsection{Flujo de Verificación de Email}
+
+\textbf{Contexto}: Tras registro exitoso, el usuario debe verificar su email antes de poder acceder plenamente a la plataforma. Este flujo previene:
+\begin{itemize}
+  \item Registro con emails inválidos o pertenecientes a terceros.
+  \item Enumeración de usuarios a través del registro.
+\end{itemize}
+
+\textbf{Implementación}:
+
+\begin{enumerate}
+  \item \textbf{Generación de Token}: Tras registro, servidor genera token de verificación:
+    \begin{itemize}
+      \item String aleatorio de 32 bytes (cryptographically secure random).
+      \item Codificado en base64url para transportabilidad.
+      \item Expiración: 24 horas (suficiente para verificación, no abusivo).
+    \end{itemize}
+  \item \textbf{Almacenamiento}: Token se almacena hasheado en nueva tabla \texttt{EmailTokens}:
+    \begin{itemize}
+      \item \textbf{hash}: SHA-256 del token (clave única).
+      \item \textbf{user\_id}: Referencia al usuario.
+      \item \textbf{type}: Identificador del tipo de token (verificación, reset, etc.).
+      \item \textbf{expires\_at}: Timestamp de expiración.
+      \item \textbf{created\_at}: Timestamp de creación.
+    \end{itemize}
+  \item \textbf{Transmisión}: Token (sin hashear) se envía por email como enlace: \texttt{https://app.com/verify?token=<token>}.
+  \item \textbf{Verificación}:
+    \begin{itemize}
+      \item Cliente accede enlace con token en querystring.
+      \item Servidor hashea token recibido.
+      \item Busca hash en tabla EmailTokens.
+      \item Si existe, no expiró, y type=``verify'': marca \texttt{email\_verified=TRUE} en tabla Usuarios.
+      \item Elimina token de BD (consumo único).
+      \item Error genérico 400 si token no válido o expirado (prevenir enumeración).
+    \end{itemize}
+  \item \textbf{Reintentos}: Endpoint permite reenviar email de verificación (rate limited a 1 por hora) generando nuevo token.
+\end{enumerate}
+
+\subsection{Flujo de Recuperación de Contraseña}
+
+\textbf{Contexto}: Usuario que olvidó su contraseña debe poder restablecerla de manera segura. Este flujo es crítico pues representa riesgo elevado si se implementa incorrectamente. Requisitos:
+\begin{itemize}
+  \item Evitar enumeración de usuarios (no revelar si email existe).
+  \item Tokens de reseteo de corta duración (mismo mecanismo de verificación de email).
+  \item Prevenir ataques de fuerza bruta sobre el token.
+  \item Invalidar token tras uso único.
+  \item Revisar si usuario intenta reuso de token comprometido.
+\end{itemize}
+
+\textbf{Implementación}:
+
+\begin{enumerate}
+  \item \textbf{Petición}: Cliente envía email a \texttt{/api/forgot-password}.
+  \item \textbf{Rate Limiting}: Endpoint limitado a 5 solicitudes por IP/hora (prevenir DoS).
+  \item \textbf{Búsqueda de Usuario}:
+    \begin{itemize}
+      \item Servidor busca usuario por email.
+      \item \textbf{Respuesta Uniformizada}: Independientemente de si usuario existe, responde:
+        \begin{center}
+          \texttt{``Si el email existe, recibirá instrucciones de reseteo''}
+        \end{center}
+      \item \textbf{Justificación}: Previene enumeración de usuarios en el sistema.
+    \end{itemize}
+  \item \textbf{Generación de Token} (si usuario existe):
+    \begin{itemize}
+      \item String aleatorio 32 bytes (cryptographically secure).
+      \item Expiración: 1 hora (balance entre usabilidad y seguridad).
+      \item Hash SHA-256 almacenado en tabla \texttt{EmailTokens} con \texttt{type='password\_reset'}.
+      \item Se revoca cualquier token anterior no consumido del mismo tipo para este usuario.
+    \end{itemize}
+  \item \textbf{Envío Asincrónico}: Token se envía por email (no bloqueante):
+    \begin{center}
+      \texttt{https://app.com/reset-password?token=<token>}
+    \end{center}
+  \item \textbf{Verificación del Token}:
+    \begin{itemize}
+      \item Cliente accede enlace con token.
+      \item Servidor hashea token, busca en \texttt{EmailTokens}.
+      \item Valida tipo=``password\_reset'' y no expirado.
+      \item Si válido: retorna formulario para nueva contraseña (no usuario ni email).
+    \end{itemize}
+  \item \textbf{Reseteo de Contraseña}:
+    \begin{itemize}
+      \item Cliente envía token + nueva contraseña a \texttt{/api/reset-password}.
+      \item Servidor re-valida token (podría haber expirado).
+      \item Valida nueva contraseña (mín. 12 caracteres, complejidad, no reutilización).
+      \item Hashea con Argon2id y almacena.
+      \item \textbf{Seguridad Adicional}: Revoca todas las sesiones activas del usuario (tabla Sesiones).
+        \begin{itemize}
+          \item Justificación: Si contraseña fue comprometida, atacante es desconectado.
+          \item Usuario legítimo deberá hacer login nuevamente con nueva contraseña.
+        \end{itemize}
+      \item Elimina token de BD (consumo único).
+      \item Envía email de confirmación al usuario notificando reseteo exitoso.
+    \end{itemize}
+  \item \textbf{Auditoría}: Se registra intento de reseteo (email, timestamp, IP) en logs para detectar patrones sospechosos.
+\end{enumerate}
+
+\textbf{Protección contra Ataques}:
+
+\begin{itemize}
+  \item \textbf{Token Guessing}: Tokens de 32 bytes = 256 bits de entropía. Espacio de $2^{256}$ combinaciones. Con rate limiting, impracticable.
+  \item \textbf{Reuso de Token}: Eliminación inmediata tras consumo previene reuso. Intentos posteriores fallan.
+  \item \textbf{Enumeración}: Respuesta uniformizada oculta si usuario existe.
+  \item \textbf{Email Interception}: Si correo es interceptado, token expira en 1 hora. TLS y SPF/DKIM mitigan riesgos.
+  \item \textbf{Session Hijacking}: Revocación de sesiones previene que atacante mantenga acceso con contraseña antigua.
+\end{itemize}
+
 \section{DIAGRAMAS DE SECUENCIA}
 
 Los siguientes diagramas ilustran los flujos críticos del sistema de autenticación.
@@ -282,6 +390,18 @@ Los siguientes diagramas ilustran los flujos críticos del sistema de autenticac
   \item Escalabilidad y seguridad mejoradas en arquitecturas distribuidas.
 \end{itemize}
 
+\subsection{Hashing de Tokens de Verificación y Reseteo}
+
+\textbf{Contexto}: Tokens de email (verificación, reseteo contraseña) son credenciales temporales de alto valor. Si BD se compromete, estos tokens no deben ser reutilizables directamente.
+
+\textbf{Implementación}:
+\begin{itemize}
+  \item \textbf{Generación}: Token opaco de 32 bytes, codificado base64url.
+  \item \textbf{Almacenamiento}: Se calcula SHA-256(token) y se almacena este hash en BD, junto con metadatos (tipo, user\_id, expires\_at).
+  \item \textbf{Validación}: Cuando usuario accede enlace, servidor hashea el token recibido y compara con hash almacenado.
+  \item \textbf{Defensa}: Incluso si BD es comprometida, atacante solo obtiene hashes unidireccionales. Imposible reconstruir tokens sin inversión SHA-256 (computacionalmente inviable).
+\end{itemize}
+
 \section{GESTIÓN DE SESIONES Y ALMACENAMIENTO DE TOKENS}
 
 \subsection{Método: Cookies con Seguridad Reforzada}
@@ -302,6 +422,139 @@ Como tokens no son accesibles por JavaScript, el cliente infiere estado de auten
   \item \textbf{200 OK}: Sesión válida, datos del usuario retornados.
   \item \textbf{401 Unauthorized}: Usuario no autenticado.
 \end{itemize}
+
+\section{AUTENTICACIÓN MULTIFACTOR (MFA) - DEFENSA EN PROFUNDIDAD}
+
+\textbf{Motivación}: Las contraseñas, incluso hasheadas de forma segura, pueden ser comprometidas por:
+\begin{itemize}
+  \item Phishing y ingeniería social.
+  \item Filtraciones de datos de terceros (reutilización de contraseñas).
+  \item Malware local capturando teclas.
+  \item Ataques de fuerza bruta exitosos (aunque raros con Argon2id).
+\end{itemize}
+
+MFA implementa un segundo factor de autenticación, garantizando que incluso con contraseña comprometida, el atacante no pueda acceder sin el segundo factor.
+
+\subsection{Factores Soportados}
+
+\subsubsection{Factor 1: TOTP (Time-based One-Time Password)}
+
+\textbf{Descripción}: Aplicaciones como Google Authenticator, Authy generan códigos de 6 dígitos cada 30 segundos basados en secreto compartido.
+
+\textbf{Implementación}:
+\begin{enumerate}
+  \item \textbf{Generación de Secreto}:
+    \begin{itemize}
+      \item Servidor genera base32-encoded secret de 160 bits (20 bytes).
+      \item Se almacena hasheado (SHA-256) en tabla \texttt{MFASecrets}.
+      \item Usuario escanea QR (contiene secreto) con app autenticadora.
+    \end{itemize}
+  \item \textbf{Algoritmo}: RFC 6238 - HMAC-SHA1(secret, tiempo) $\bmod 10^6$.
+  \item \textbf{Validación}:
+    \begin{itemize}
+      \item Usuario ingresa código de 6 dígitos.
+      \item Servidor calcula códigos esperados para ventana temporal actual $\pm$ 1 step (30 seg).
+      \item Previene sincronización reloj.
+      \item Rate limiting: máximo 5 intentos fallidos por intento de login (bloquea 15 min).
+    \end{itemize}
+  \item \textbf{Recuperación}: Códigos de backup (``recovery codes'') almacenados hasheados:
+    \begin{itemize}
+      \item 10 códigos alfanuméricos únicos, de un solo uso.
+      \item Usuario los guarda en lugar seguro (password manager).
+      \item Permite acceso si dispositivo autenticador se pierde.
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Seguridad}:
+\begin{itemize}
+  \item \textbf{No requiere conexión}: Funciona offline (a diferencia de SMS/email).
+  \item \textbf{Secreto compartido asimétrico}: No se transmite, solo escanea QR.
+  \item \textbf{Código corta duración}: Válido solo 60 segundos (ventana $\pm$ 30 seg).
+  \item \textbf{Hardware agnostic}: Funciona en cualquier smartphone.
+\end{itemize}
+
+\subsubsection{Factor 2: Backup Codes (Códigos de Recuperación)}
+
+\textbf{Propósito}: Acceso de emergencia si autenticador primario se pierde/daña.
+
+\textbf{Generación}: 10 códigos alfanuméricos (12 caracteres) usando cryptographically secure RNG.
+
+\textbf{Almacenamiento}: SHA-256(codigo) almacenado en tabla \texttt{BackupCodes}. Cuando se usan, se marcan como consumidos (usado=TRUE).
+
+\subsection{Flujo de Login con MFA Habilitado}
+
+\begin{enumerate}
+  \item \textbf{Paso 1 - Autenticación Primaria}:
+    \begin{itemize}
+      \item Usuario envía email + contraseña a \texttt{/api/login}.
+      \item Servidor verifica credenciales (como en flujo estándar).
+      \item Si válidas: no emite tokens aún.
+    \end{itemize}
+  \item \textbf{Paso 2 - Desafío MFA}:
+    \begin{itemize}
+      \item Servidor verifica si usuario tiene MFA habilitado (campo \texttt{mfa\_enabled=TRUE}).
+      \item Genera \texttt{mfa\_challenge\_id} (UUID temporal con expiración 5 min).
+      \item Retorna: \texttt{\{challenge\_id, requires\_mfa: true\}}.
+      \item Cliente muestra pantalla para ingreso de código TOTP o backup code.
+    \end{itemize}
+  \item \textbf{Paso 3 - Validación de MFA}:
+    \begin{itemize}
+      \item Usuario ingresa código a \texttt{/api/verify-mfa} con \texttt{challenge\_id}.
+      \item Servidor valida que \texttt{challenge\_id} existe y no expiró.
+      \item Valida código TOTP (con ventana temporal).
+      \item Si es backup code: verifica hash, marca consumido.
+      \item Rate limiting: 5 intentos fallidos bloquea 15 min.
+    \end{itemize}
+  \item \textbf{Paso 4 - Emisión de Tokens}:
+    \begin{itemize}
+      \item MFA validado: genera access + refresh tokens como de costumbre.
+      \item Flag \texttt{mfa\_verified=TRUE} en JWT (indica segundo factor verificado).
+      \item Elimina \texttt{mfa\_challenge\_id} de BD.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Gestión de MFA}
+
+\textbf{Tabla: MFASecrets}
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{|l|l|p{3cm}|}
+    \hline
+    \textbf{Columna} & \textbf{Tipo} & \textbf{Descripción} \\
+    \hline
+    id & UUID PK & Identificador \\
+    \hline
+    user\_id & UUID FK & Usuario propietario \\
+    \hline
+    secret\_hash & VARCHAR & SHA-256 del secreto TOTP (nunca almacenar en texto plano) \\
+    \hline
+    mfa\_enabled & BOOLEAN & Flag de habilitación \\
+    \hline
+    backup\_codes & JSONB & Lista de hashes de códigos de backup \\
+    \hline
+    created\_at & TIMESTAMP & Fecha de activación \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\textbf{Endpoints}:
+\begin{itemize}
+  \item \texttt{POST /api/mfa/setup}: Genera QR con secreto. Usuario debe confirmar ingresando código válido antes de habilitar.
+  \item \texttt{POST /api/mfa/disable}: Requiere contraseña + código MFA válido. Deshabilita MFA y revoca todas las sesiones (obliga re-login).
+  \item \texttt{POST /api/mfa/backup-codes}: Regenera nuevos códigos (invalida anteriores).
+\end{itemize}
+
+\subsection{Defensa contra Ataques MFA}
+
+\begin{description}
+  \item[Ataque: Time-Synchronization] Si reloj del dispositivo está desfasado. \textbf{Mitigación}: Ventana de $\pm$1 step (30 seg) tolera desviaciones pequeñas.
+  \item[Ataque: Fuerza Bruta en TOTP] $10^6$ combinaciones (códigos de 6 dígitos). \textbf{Mitigación}: Rate limiting 5 intentos/15 min; códigos válidos solo 60 seg.
+  \item[Ataque: Interceptación de QR] QR con secreto transmitido durante setup. \textbf{Mitigación}: Setup requiere confirmar con código TOTP; si atacante captura QR, debe hacer login para confirmar (no tiene acceso a contraseña).
+  \item[Ataque: Phishing de Código TOTP] Usuario engañado ingresa código. \textbf{Mitigación}: Código válido solo 60 seg; contexto de phishing típicamente asincrónico. Implementación futura: risk-based auth detecta anomalías (ubicación, dispositivo).
+  \item[Ataque: Pérdida de Dispositivo] Usuario pierde teléfono con autenticador. \textbf{Mitigación}: Backup codes permiten acceso; endpoint \texttt{/api/mfa/disable} requiere contraseña para deshabilitar (acceso a contraseña restablecida vía email de recuperación).
+\end{description}
 
 \section{PRIVACIDAD Y MINIMIZACIÓN DE DATOS}
 
@@ -328,9 +581,21 @@ Sistema provee endpoint de eliminación de cuenta (previa re-autenticación):
 
 \section{CONCLUSIONES}
 
-El sistema de autenticación diseñado implementa múltiples capas de seguridad: hashing moderno (Argon2id), tokens de corta duración con rotación automática, refresh tokens stateful para revocación, cookies seguras contra XSS/CSRF, y privacidad por diseño. Cumple con estándares OWASP, NIST SP 800-63B y principios de minimización de datos.
+El sistema de autenticación diseñado implementa múltiples capas de seguridad:
 
-Las mejoras futuras incluyen autenticación multifactor (TOTP, WebAuthn), análisis de riesgo adaptativo, y arquitectura zero trust. La seguridad es un proceso continuo que requiere revisiones de código, pentesting, y actualizaciones de dependencias.
+\begin{enumerate}
+  \item \textbf{Primer Factor}: Contraseña hasheada con Argon2id (memory-hard, resistente a GPU).
+  \item \textbf{Segundo Factor}: MFA opcional con TOTP + backup codes para defensa contra compromiso de contraseña.
+  \item \textbf{Gestión de Sesión}: Tokens JWT de corta duración (15 min) con rotación automática; refresh tokens stateful (7 días) almacenados como hashes para revocación.
+  \item \textbf{Verificación de Email}: Tokens únicos de 32 bytes hasheados con SHA-256, consumo único, expiración 24h.
+  \item \textbf{Recuperación de Contraseña}: Tokens de reseteo hasheados, expiración 1h, revocación de sesiones tras cambio, respuesta uniformizada para prevenir enumeración.
+  \item \textbf{Prevención de Ataques Comunes}: Rate limiting, protección XSS/CSRF (cookies HttpOnly+Secure+SameSite), validaciones de entrada, errores genéricos (no enumeración).
+  \item \textbf{Privacidad por Diseño}: Minimización de datos (solo email/contraseña en registro), JWTs sin PII, retención limitada, derecho al olvido.
+\end{enumerate}
+
+El sistema cumple con estándares OWASP Top 10, NIST SP 800-63B (nivel 2 con MFA, nivel 3 con recuperación robusto), y reglamentos GDPR. La arquitectura es defensiva en profundidad: compromiso de un factor no garantiza acceso.
+
+Mejoras futuras: WebAuthn (credenciales sin contraseña), análisis de riesgo adaptativo (detección de anomalías geográficas/dispositivo), logging continuo para auditoría, y arquitectura zero trust. La seguridad es un proceso iterativo que requiere revisiones regulares de código, pentesting anual, y actualizaciones de dependencias.
 
 \newpage
 
@@ -341,10 +606,14 @@ Las mejoras futuras incluyen autenticación multifactor (TOTP, WebAuthn), análi
   \item OWASP. (2023). Authentication Cheat Sheet. https://cheatsheetseries.owasp.org/
   \item NIST. (2020). SP 800-63B: Digital Identity Guidelines - Authentication.
   \item RFC 7519: JSON Web Token (JWT). https://tools.ietf.org/html/rfc7519
+  \item RFC 6238: TOTP: Time-Based One-Time Password Algorithm. https://tools.ietf.org/html/rfc6238
   \item Biryukov, A., Dinu, D., \& Khovratovich, D. (2016). Argon2: Memory-hard function for password hashing.
   \item OWASP. Password Storage Cheat Sheet. https://cheatsheetseries.owasp.org/
+  \item OWASP. Multi-Factor Authentication Cheat Sheet. https://cheatsheetseries.owasp.org/
   \item Mozilla. Web Security Guidelines. https://infosec.mozilla.org/guidelines/web\_security
   \item EU GDPR (2016/679). Reglamento General de Protección de Datos.
+  \item M'Raihi, D., Machani, S., Pei, M., \& Rydell, J. (2011). TOTP: Time-Based One-Time Password Algorithm. RFC 6238.
+  \item Wouters, P. (2014). Secure Password Storage and Recovery. White Paper.
 \end{enumerate}
 
 \end{document}
